@@ -27,13 +27,28 @@ let mcpConfigResolved = false;
  * Lazily generate MCP config on first request (not at load time).
  * pi.getAllTools() fails during extension loading; this defers it
  * until the pi runtime is fully initialized.
+ *
+ * Only locks (sets mcpConfigResolved) when getAllTools() returns a
+ * real array — if it returns undefined/null (registry not ready),
+ * we retry on the next request. Once the registry is ready we
+ * commit to the result even if there are zero custom tools.
+ *
  * Uses warn-don't-block: failure logs a warning but does not
  * prevent the provider from functioning (built-ins still work).
  */
 function ensureMcpConfig(pi: ExtensionAPI): string | undefined {
   if (mcpConfigResolved) return mcpConfigPath;
-  mcpConfigResolved = true;
   try {
+    const allTools = pi.getAllTools();
+
+    // Registry not ready yet — don't lock, retry on next call
+    if (!Array.isArray(allTools)) {
+      return mcpConfigPath;
+    }
+
+    // Registry is ready — lock regardless of whether custom tools exist
+    mcpConfigResolved = true;
+
     const toolDefs = getCustomToolDefs(pi);
     if (toolDefs.length > 0) {
       mcpConfigPath = writeMcpConfig(toolDefs);

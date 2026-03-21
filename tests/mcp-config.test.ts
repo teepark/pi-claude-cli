@@ -151,6 +151,24 @@ describe("getCustomToolDefs", () => {
     const result = getCustomToolDefs(mockPi);
     expect(result).toEqual([]);
   });
+
+  it("returns empty array when pi.getAllTools() returns undefined", () => {
+    const mockPi = {
+      getAllTools: vi.fn(() => undefined),
+    };
+
+    const result = getCustomToolDefs(mockPi);
+    expect(result).toEqual([]);
+  });
+
+  it("returns empty array when pi.getAllTools() returns null", () => {
+    const mockPi = {
+      getAllTools: vi.fn(() => null),
+    };
+
+    const result = getCustomToolDefs(mockPi);
+    expect(result).toEqual([]);
+  });
 });
 
 describe("writeMcpConfig", () => {

@@ -122,18 +122,38 @@ export function streamViaCli(
       // Write user message to subprocess stdin
       writeUserMessage(proc, prompt);
 
+      // Create event bridge (before endStreamWithError so bridge is in scope)
+      const bridge = createEventBridge(stream, model);
+
       // Guard against double stream.end() and double error events.
       // First error path wins; subsequent ones are no-ops.
       let streamEnded = false;
 
       /**
-       * Push an error event and end the stream, with guards.
-       * No-ops if stream already ended or if broken (intentional break-early kill).
+       * End the stream with an error, using a "done" event instead of "error".
+       *
+       * Why "done" not "error": AssistantMessageEventStream.extractResult()
+       * returns event.error (a string) for error events, but agent-loop.js
+       * then calls message.content.filter() on the result, crashing because
+       * a string has no .content property. By pushing "done" with a valid
+       * AssistantMessage (content:[]), pi gets a well-formed object.
        */
-      function endStreamWithError(message: string) {
+      function endStreamWithError(errMsg: string) {
         if (streamEnded || broken) return;
         streamEnded = true;
-        stream.push({ type: "error", reason: "error", error: message } as any);
+        const output = bridge.getOutput();
+        const errorMessage = {
+          ...output,
+          content: output.content?.length
+            ? output.content
+            : [{ type: "text" as const, text: `Error: ${errMsg}` }],
+          stopReason: "stop" as const,
+        };
+        stream.push({
+          type: "done",
+          reason: "stop",
+          message: errorMessage,
+        } as any);
         stream.end();
       }
 
@@ -164,9 +184,6 @@ export function streamViaCli(
         }
         options.signal.addEventListener("abort", abortHandler, { once: true });
       }
-
-      // Create event bridge
-      const bridge = createEventBridge(stream, model);
 
       // Track tool_use blocks for break-early decision at message_stop
       let sawBuiltInOrCustomTool = false;

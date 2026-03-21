@@ -36,6 +36,10 @@ export interface McpToolDef {
 export function getCustomToolDefs(pi: any): McpToolDef[] {
   const allTools = pi.getAllTools();
 
+  if (!Array.isArray(allTools)) {
+    return [];
+  }
+
   return allTools
     .filter((tool: any) => !BUILT_IN_TOOL_NAMES.has(tool.name))
     .map((tool: any) => ({
