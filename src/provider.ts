@@ -233,10 +233,16 @@ export function streamViaCli(
         if (!msg) return;
 
         if (msg.type === "stream_event") {
-          bridge.handleEvent(msg.event);
+          // Only forward top-level events to pi's event bridge.
+          // Sub-agent events (parent_tool_use_id !== null) are internal to the CLI.
+          const isTopLevel = !(msg as any).parent_tool_use_id;
+          if (isTopLevel) {
+            bridge.handleEvent(msg.event);
+          }
 
-          // Track tool_use blocks for break-early decision
+          // Track tool_use blocks for break-early decision (top-level only)
           if (
+            isTopLevel &&
             msg.event.type === "content_block_start" &&
             msg.event.content_block?.type === "tool_use"
           ) {
@@ -249,7 +255,12 @@ export function streamViaCli(
           }
 
           // Break-early at message_stop: kill subprocess before CLI auto-executes tools
-          if (msg.event.type === "message_stop" && sawBuiltInOrCustomTool) {
+          // Only on top-level message_stop — sub-agent message_stop is internal
+          if (
+            isTopLevel &&
+            msg.event.type === "message_stop" &&
+            sawBuiltInOrCustomTool
+          ) {
             broken = true; // Set guard BEFORE rl.close() to prevent buffered lines
             clearTimeout(inactivityTimer);
             // Pi will execute these tools. Kill subprocess to prevent CLI from executing them.

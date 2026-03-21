@@ -881,6 +881,158 @@ describe("streamViaCli", () => {
       expect(proc.kill).toHaveBeenCalledWith("SIGKILL");
     });
 
+    it("does NOT break-early for pi-known tools inside sub-agents (parent_tool_use_id set)", async () => {
+      const model = mockModels[0] as any;
+      const context = {
+        messages: [{ role: "user", content: "Run an agent" }],
+      };
+
+      streamViaCli(model, context);
+      await vi.advanceTimersByTimeAsync(0);
+
+      const proc = (spawn as any).mock.results[0].value;
+
+      // Top-level: Agent tool_use (not pi-known, no break-early)
+      // Then sub-agent uses Read (pi-known, but parent_tool_use_id is set)
+      // Then sub-agent message_stop (should NOT trigger break-early)
+      // Then top-level text response and message_stop (no tool_use, no break-early)
+      const lines = [
+        JSON.stringify({
+          type: "stream_event",
+          event: {
+            type: "message_start",
+            message: { usage: { input_tokens: 10, output_tokens: 0 } },
+          },
+          parent_tool_use_id: null,
+        }),
+        // Top-level: Agent tool call
+        JSON.stringify({
+          type: "stream_event",
+          event: {
+            type: "content_block_start",
+            index: 0,
+            content_block: {
+              type: "tool_use",
+              id: "agent_1",
+              name: "Agent",
+            },
+          },
+          parent_tool_use_id: null,
+        }),
+        JSON.stringify({
+          type: "stream_event",
+          event: { type: "content_block_stop", index: 0 },
+          parent_tool_use_id: null,
+        }),
+        JSON.stringify({
+          type: "stream_event",
+          event: {
+            type: "message_delta",
+            delta: { stop_reason: "tool_use" },
+            usage: { output_tokens: 5 },
+          },
+          parent_tool_use_id: null,
+        }),
+        JSON.stringify({
+          type: "stream_event",
+          event: { type: "message_stop" },
+          parent_tool_use_id: null,
+        }),
+        // Sub-agent: Read tool (pi-known, but inside sub-agent)
+        JSON.stringify({
+          type: "stream_event",
+          event: {
+            type: "content_block_start",
+            index: 0,
+            content_block: {
+              type: "tool_use",
+              id: "read_1",
+              name: "Read",
+            },
+          },
+          parent_tool_use_id: "agent_1",
+        }),
+        JSON.stringify({
+          type: "stream_event",
+          event: { type: "message_stop" },
+          parent_tool_use_id: "agent_1",
+        }),
+        // Top-level: final text response
+        JSON.stringify({
+          type: "stream_event",
+          event: {
+            type: "message_start",
+            message: { usage: { input_tokens: 20, output_tokens: 0 } },
+          },
+          parent_tool_use_id: null,
+        }),
+        JSON.stringify({
+          type: "stream_event",
+          event: {
+            type: "content_block_start",
+            index: 0,
+            content_block: { type: "text", text: "" },
+          },
+          parent_tool_use_id: null,
+        }),
+        JSON.stringify({
+          type: "stream_event",
+          event: {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "text_delta", text: "Agent found the code." },
+          },
+          parent_tool_use_id: null,
+        }),
+        JSON.stringify({
+          type: "stream_event",
+          event: { type: "content_block_stop", index: 0 },
+          parent_tool_use_id: null,
+        }),
+        JSON.stringify({
+          type: "stream_event",
+          event: {
+            type: "message_delta",
+            delta: { stop_reason: "end_turn" },
+            usage: { output_tokens: 10 },
+          },
+          parent_tool_use_id: null,
+        }),
+        JSON.stringify({
+          type: "stream_event",
+          event: { type: "message_stop" },
+          parent_tool_use_id: null,
+        }),
+        JSON.stringify({
+          type: "result",
+          subtype: "success",
+          result: "Agent found the code.",
+        }),
+      ];
+
+      for (const line of lines) {
+        proc.stdout.write(line + "\n");
+      }
+      proc.stdout.end();
+      await vi.advanceTimersByTimeAsync(100);
+
+      // Should NOT have been killed at any message_stop (no top-level pi-known tools)
+      // The Read inside the sub-agent should be ignored for break-early
+      const killBeforeResult = proc.kill.mock.calls.filter(
+        (call: any[]) => call[0] === "SIGKILL",
+      );
+      expect(killBeforeResult).toHaveLength(0);
+
+      // Should have received the final text response
+      const mockStream = MockAssistantMessageEventStream.mock.instances[0];
+      const textEvents = mockStream._events.filter(
+        (e: any) => e.type === "text_delta",
+      );
+      expect(textEvents.length).toBeGreaterThan(0);
+
+      vi.advanceTimersByTime(500);
+    });
+
     it("does NOT break-early when only user MCP tools are seen (not custom-tools)", async () => {
       const model = mockModels[0] as any;
       const context = {
