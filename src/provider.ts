@@ -20,7 +20,11 @@ import {
   type Model,
   type SimpleStreamOptions,
 } from "@mariozechner/pi-ai";
-import { buildPrompt, buildSystemPrompt } from "./prompt-builder.js";
+import {
+  buildPrompt,
+  buildSystemPrompt,
+  buildResumePrompt,
+} from "./prompt-builder.js";
 import {
   spawnClaude,
   writeUserMessage,
@@ -35,7 +39,6 @@ import { createEventBridge } from "./event-bridge.js";
 import { handleControlRequest } from "./control-handler.js";
 import { mapThinkingEffort } from "./thinking-config.js";
 import { isPiKnownClaudeTool } from "./tool-mapping.js";
-
 /** Inactivity timeout: kill subprocess if no stdout for 180 seconds (3 minutes). */
 const INACTIVITY_TIMEOUT_MS = 180_000;
 
@@ -76,12 +79,24 @@ export function streamViaCli(
     let abortHandler: (() => void) | undefined;
 
     try {
-      // Build prompt from conversation context
-      const prompt = buildPrompt(context);
-      const systemPrompt = buildSystemPrompt(
-        context,
-        options?.cwd ?? process.cwd(),
-      );
+      const cwd = options?.cwd ?? process.cwd();
+
+      // Resume if pi provides a session ID AND this isn't the first turn.
+      // Pi passes sessionId on every call (including first), but we can only
+      // --resume a CLI session that already exists on disk from a prior turn.
+      const resumeSessionId =
+        options?.sessionId && context.messages.length > 1
+          ? options.sessionId
+          : undefined;
+
+      // Build prompt: if resuming, only send the latest user turn;
+      // otherwise build the full flattened conversation history
+      const prompt = resumeSessionId
+        ? buildResumePrompt(context)
+        : buildPrompt(context);
+      const systemPrompt = resumeSessionId
+        ? undefined
+        : buildSystemPrompt(context, cwd);
 
       // Compute effort level from reasoning options
       const effort = mapThinkingEffort(
@@ -92,10 +107,12 @@ export function streamViaCli(
 
       // Spawn subprocess
       proc = spawnClaude(model.id, systemPrompt || undefined, {
-        cwd: options?.cwd,
+        cwd,
         signal: options?.signal,
         effort,
         mcpConfigPath: options?.mcpConfigPath,
+        resumeSessionId,
+        newSessionId: !resumeSessionId ? options?.sessionId : undefined,
       });
       const getStderr = captureStderr(proc);
 

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { buildPrompt } from "../src/prompt-builder";
+import { buildPrompt, buildResumePrompt } from "../src/prompt-builder";
 
 describe("buildPrompt", () => {
   it("returns empty string for empty messages array", () => {
@@ -909,5 +909,159 @@ describe("buildSystemPrompt", () => {
     const result = bsp(context, "/some/project");
     expect(result).toContain("IMPORTANT:");
     expect(result).toContain("tool results");
+  });
+});
+
+describe("buildResumePrompt", () => {
+  it("returns empty string for empty messages array", () => {
+    expect(buildResumePrompt({ messages: [] })).toBe("");
+  });
+
+  it("returns just the user message text for a single user message", () => {
+    const context = {
+      messages: [{ role: "user", content: "Hello world" }],
+    };
+    expect(buildResumePrompt(context)).toBe("Hello world");
+  });
+
+  it("extracts only the last user message from a multi-turn conversation", () => {
+    const context = {
+      messages: [
+        { role: "user", content: "First question" },
+        { role: "assistant", content: "First answer" },
+        { role: "user", content: "Follow-up question" },
+      ],
+    };
+    expect(buildResumePrompt(context)).toBe("Follow-up question");
+  });
+
+  it("includes tool results preceding the final user message", () => {
+    const context = {
+      messages: [
+        { role: "user", content: "Read a file" },
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              name: "read",
+              arguments: { path: "/foo.ts" },
+            },
+          ],
+        },
+        {
+          role: "toolResult",
+          toolName: "read",
+          content: "file contents here",
+        },
+        { role: "user", content: "Now explain it" },
+      ],
+    };
+    const result = buildResumePrompt(context) as string;
+    expect(result).toContain("TOOL RESULT (historical Read):");
+    expect(result).toContain("file contents here");
+    expect(result).toContain("Now explain it");
+  });
+
+  it("includes multiple tool results preceding the final user message", () => {
+    const context = {
+      messages: [
+        { role: "user", content: "Read two files" },
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              name: "read",
+              arguments: { path: "/a.ts" },
+            },
+            {
+              type: "toolCall",
+              name: "read",
+              arguments: { path: "/b.ts" },
+            },
+          ],
+        },
+        {
+          role: "toolResult",
+          toolName: "read",
+          content: "contents of a",
+        },
+        {
+          role: "toolResult",
+          toolName: "read",
+          content: "contents of b",
+        },
+        { role: "user", content: "Compare them" },
+      ],
+    };
+    const result = buildResumePrompt(context) as string;
+    expect(result).toContain("contents of a");
+    expect(result).toContain("contents of b");
+    expect(result).toContain("Compare them");
+  });
+
+  it("handles custom tool results with plain name format", () => {
+    const context = {
+      messages: [
+        { role: "user", content: "Deploy" },
+        {
+          role: "assistant",
+          content: [{ type: "toolCall", name: "deploy", arguments: {} }],
+        },
+        {
+          role: "toolResult",
+          toolName: "deploy",
+          content: "Deployed successfully",
+        },
+        { role: "user", content: "Check status" },
+      ],
+    };
+    const result = buildResumePrompt(context) as string;
+    expect(result).toContain("TOOL RESULT (deploy):");
+    expect(result).toContain("Deployed successfully");
+    expect(result).toContain("Check status");
+  });
+
+  it("returns empty string when no user message found", () => {
+    const context = {
+      messages: [{ role: "assistant", content: "Hello" }],
+    };
+    expect(buildResumePrompt(context)).toBe("");
+  });
+
+  it("handles content blocks array for user message", () => {
+    const context = {
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "text", text: "Hello from blocks" }],
+        },
+      ],
+    };
+    expect(buildResumePrompt(context)).toBe("Hello from blocks");
+  });
+
+  it("handles images in the final user message by returning ContentBlock[]", () => {
+    const context = {
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "Look at this" },
+            {
+              type: "image",
+              data: "abc123",
+              mimeType: "image/png",
+            },
+          ],
+        },
+      ],
+    };
+    const result = buildResumePrompt(context);
+    expect(Array.isArray(result)).toBe(true);
+    expect((result as any[]).length).toBe(2);
+    expect((result as any[])[0].type).toBe("text");
+    expect((result as any[])[1].type).toBe("image");
   });
 });

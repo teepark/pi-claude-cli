@@ -4,7 +4,7 @@ A [pi](https://github.com/mariozechner/pi-coding-agent) extension that routes LL
 
 ## How it works
 
-The extension registers as a custom pi provider exposing all Claude models. Each request spawns a fresh `claude -p` subprocess using the stream-json wire protocol. Claude proposes tool calls, pi executes them natively. Custom pi tools are exposed to Claude via a schema-only MCP server.
+The extension registers as a custom pi provider exposing all Claude models. Each request spawns a `claude -p` subprocess using the stream-json wire protocol, with `--resume` on follow-up turns to reuse the CLI's session state instead of replaying full history. Claude proposes tool calls, pi executes them natively. Custom pi tools are exposed to Claude via a schema-only MCP server.
 
 ## Requirements
 
@@ -30,6 +30,7 @@ Then select a Claude model via `/model` in the interactive UI. All Claude models
 - Maps tool names and arguments bidirectionally between Claude and pi
 - Exposes custom pi tools to Claude via MCP (schema-only, no execution)
 - Break-early pattern prevents Claude CLI from auto-executing tools
+- Session resume via `--resume` eliminates history replay on follow-up turns
 - Configurable thinking effort with elevated budgets for Opus models
 - Cross-platform subprocess management (Windows, macOS, Linux)
 - Inactivity timeout and process registry for cleanup

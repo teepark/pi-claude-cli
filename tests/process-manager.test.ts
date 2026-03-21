@@ -59,7 +59,7 @@ describe("spawnClaude", () => {
     expect(args).toContain("--output-format");
     expect(args).toContain("--verbose");
     expect(args).toContain("--include-partial-messages");
-    expect(args).toContain("--no-session-persistence");
+    expect(args).not.toContain("--no-session-persistence");
     expect(args).toContain("--model");
     expect(args).toContain("claude-sonnet-4-5-20250929");
     expect(args).toContain("--permission-prompt-tool");
@@ -549,6 +549,52 @@ describe("process registry", () => {
     proc3.exitCode = null;
     killAllProcesses();
     expect(proc3.kill).not.toHaveBeenCalled();
+  });
+});
+
+describe("resume session flag", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("includes --resume followed by session ID when resumeSessionId is provided", () => {
+    spawnClaude("claude-sonnet-4-5-20250929", undefined, {
+      resumeSessionId: "session-abc-123",
+    });
+    const args = (spawn as any).mock.calls[0][1] as string[];
+
+    expect(args).toContain("--resume");
+    const idx = args.indexOf("--resume");
+    expect(args[idx + 1]).toBe("session-abc-123");
+  });
+
+  it("does NOT include --resume when resumeSessionId is undefined", () => {
+    spawnClaude("claude-sonnet-4-5-20250929");
+    const args = (spawn as any).mock.calls[0][1] as string[];
+
+    expect(args).not.toContain("--resume");
+  });
+
+  it("includes both --resume and --effort when both are provided", () => {
+    spawnClaude("claude-sonnet-4-5-20250929", undefined, {
+      resumeSessionId: "session-abc",
+      effort: "high",
+    });
+    const args = (spawn as any).mock.calls[0][1] as string[];
+
+    expect(args).toContain("--resume");
+    expect(args).toContain("--effort");
+  });
+
+  it("includes both --resume and --mcp-config when both are provided", () => {
+    spawnClaude("claude-sonnet-4-5-20250929", undefined, {
+      resumeSessionId: "session-abc",
+      mcpConfigPath: "/tmp/mcp.json",
+    });
+    const args = (spawn as any).mock.calls[0][1] as string[];
+
+    expect(args).toContain("--resume");
+    expect(args).toContain("--mcp-config");
   });
 });
 

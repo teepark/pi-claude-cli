@@ -1606,4 +1606,118 @@ describe("streamViaCli", () => {
       expect(doneEvent.message.stopReason).toBe("length");
     });
   });
+
+  describe("session resume via options.sessionId", () => {
+    it("passes --resume when sessionId option is provided on subsequent turn", async () => {
+      const model = mockModels[0] as any;
+      const context = {
+        messages: [
+          { role: "user", content: "Hello" },
+          { role: "assistant", content: "Hi" },
+          { role: "user", content: "Follow-up" },
+        ],
+      };
+
+      streamViaCli(model, context, { sessionId: "sess-abc-123" } as any);
+      await vi.advanceTimersByTimeAsync(0);
+
+      const args = (spawn as any).mock.calls[0][1] as string[];
+      expect(args).toContain("--resume");
+      const idx = args.indexOf("--resume");
+      expect(args[idx + 1]).toBe("sess-abc-123");
+
+      // Clean up
+      const proc = (spawn as any).mock.results[0].value;
+      proc.stdout.end();
+      await vi.advanceTimersByTimeAsync(100);
+    });
+
+    it("passes --session-id on first turn when sessionId provided", async () => {
+      const model = mockModels[0] as any;
+      const context = {
+        messages: [{ role: "user", content: "Hello" }],
+      };
+
+      streamViaCli(model, context, { sessionId: "sess-new" } as any);
+      await vi.advanceTimersByTimeAsync(0);
+
+      const args = (spawn as any).mock.calls[0][1] as string[];
+      expect(args).not.toContain("--resume");
+      expect(args).toContain("--session-id");
+      const idx = args.indexOf("--session-id");
+      expect(args[idx + 1]).toBe("sess-new");
+
+      // Clean up
+      const proc = (spawn as any).mock.results[0].value;
+      proc.stdout.end();
+      await vi.advanceTimersByTimeAsync(100);
+    });
+
+    it("does not pass --resume or --session-id when no sessionId option", async () => {
+      const model = mockModels[0] as any;
+      const context = {
+        messages: [{ role: "user", content: "Hello" }],
+      };
+
+      streamViaCli(model, context);
+      await vi.advanceTimersByTimeAsync(0);
+
+      const args = (spawn as any).mock.calls[0][1] as string[];
+      expect(args).not.toContain("--resume");
+      expect(args).not.toContain("--session-id");
+
+      // Clean up
+      const proc = (spawn as any).mock.results[0].value;
+      proc.stdout.end();
+      await vi.advanceTimersByTimeAsync(100);
+    });
+
+    it("uses buildResumePrompt when sessionId is provided (sends only new content)", async () => {
+      const model = mockModels[0] as any;
+      const context = {
+        messages: [
+          { role: "user", content: "first message" },
+          { role: "assistant", content: "response" },
+          { role: "user", content: "follow-up" },
+        ],
+      };
+
+      streamViaCli(model, context, { sessionId: "sess-resume" } as any);
+      await vi.advanceTimersByTimeAsync(0);
+
+      const proc = (spawn as any).mock.results[0].value;
+      const written = proc.stdin.write.mock.calls[0][0] as string;
+      const parsed = JSON.parse(written.trim());
+      // Should only contain the latest user message, not full history
+      expect(parsed.message.content).toBe("follow-up");
+
+      // Clean up
+      proc.stdout.end();
+      await vi.advanceTimersByTimeAsync(100);
+    });
+
+    it("does not pass system prompt when resuming", async () => {
+      const model = mockModels[0] as any;
+      const context = {
+        messages: [
+          { role: "user", content: "Hello" },
+          { role: "assistant", content: "Hi" },
+          { role: "user", content: "follow-up" },
+        ],
+        systemPrompt: "Be helpful",
+      };
+
+      streamViaCli(model, context, { sessionId: "sess-resume" } as any);
+      await vi.advanceTimersByTimeAsync(0);
+
+      const args = (spawn as any).mock.calls[0][1] as string[];
+      expect(args).toContain("--resume");
+      expect(args).not.toContain("--append-system-prompt");
+
+      // Clean up
+      const proc = (spawn as any).mock.results[0].value;
+      proc.stdout.end();
+      await vi.advanceTimersByTimeAsync(100);
+    });
+  });
 });

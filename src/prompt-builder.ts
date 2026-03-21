@@ -137,6 +137,80 @@ function buildCustomToolResultPrompt(messages: any[]): string | null {
   return `${userMessage}\n\n[The ${last.toolName} tool was called and returned the following result]\n${toolResult}\n\nRespond to the user using the tool result above.`;
 }
 
+/**
+ * Build a prompt for a resumed session.
+ *
+ * When resuming via --resume, the CLI already has the full conversation history.
+ * We only need to send the new content since the last turn: the last assistant
+ * response's tool results (if any) followed by the latest user message.
+ *
+ * For tool_use flows: pi sends [user, assistant(toolCall), toolResult, ...]
+ * We need to include tool results so the resumed session sees them, plus the
+ * final user message.
+ *
+ * Falls back to full prompt if the message structure is unexpected.
+ */
+export function buildResumePrompt(context: {
+  messages: any[];
+}): string | AnthropicContentBlock[] {
+  const messages = context.messages;
+  if (messages.length === 0) return "";
+
+  // Find the last user message
+  const finalUserIndex = findFinalUserMessageIndex(messages);
+  if (finalUserIndex < 0) return "";
+
+  // Collect new messages: everything from the last assistant turn onwards
+  // (tool results from the last assistant + the new user message)
+  const newMessages: any[] = [];
+
+  // Walk backwards from finalUserIndex to find where new content starts.
+  // Include trailing toolResult messages that follow the last assistant turn.
+  let startIdx = finalUserIndex;
+  for (let i = finalUserIndex - 1; i >= 0; i--) {
+    if (messages[i].role === "toolResult") {
+      startIdx = i;
+    } else {
+      break;
+    }
+  }
+
+  for (let i = startIdx; i < messages.length; i++) {
+    newMessages.push(messages[i]);
+  }
+
+  // If there are only tool results + one user message, build a combined prompt
+  const parts: string[] = [];
+  for (const msg of newMessages) {
+    if (msg.role === "toolResult") {
+      if (msg.toolName && isCustomToolName(msg.toolName)) {
+        parts.push(`TOOL RESULT (${msg.toolName}):`);
+      } else {
+        const claudeToolName = msg.toolName
+          ? mapPiToolNameToClaude(msg.toolName)
+          : "unknown";
+        parts.push(`TOOL RESULT (historical ${claudeToolName}):`);
+      }
+      parts.push(toolResultContentToText(msg.content));
+    } else if (msg.role === "user") {
+      // Check for images in the final user message
+      if (contentHasImages(msg.content)) {
+        const textSoFar = parts.join("\n");
+        const userContent = buildFinalUserContent(msg.content);
+        const result: AnthropicContentBlock[] = [];
+        if (textSoFar) {
+          result.push({ type: "text", text: textSoFar });
+        }
+        result.push(...userContent);
+        return result;
+      }
+      parts.push(userContentToText(msg.content));
+    }
+  }
+
+  return parts.join("\n") || "";
+}
+
 export function buildPrompt(context: {
   messages: any[];
 }): string | AnthropicContentBlock[] {

@@ -29,6 +29,8 @@ export function spawnClaude(
     signal?: AbortSignal;
     effort?: string;
     mcpConfigPath?: string;
+    resumeSessionId?: string;
+    newSessionId?: string;
   },
 ): ChildProcess {
   const args = [
@@ -39,12 +41,19 @@ export function spawnClaude(
     "stream-json",
     "--verbose",
     "--include-partial-messages",
-    "--no-session-persistence",
     "--model",
     modelId,
     "--permission-prompt-tool",
     "stdio",
   ];
+
+  if (options?.resumeSessionId) {
+    // Resume an existing session — CLI loads prior conversation from disk
+    args.push("--resume", options.resumeSessionId);
+  } else if (options?.newSessionId) {
+    // First turn: create session with this ID so subsequent turns can --resume it
+    args.push("--session-id", options.newSessionId);
+  }
 
   if (systemPrompt) {
     // Write system prompt to a temp file to avoid ENAMETOOLONG on Windows.
