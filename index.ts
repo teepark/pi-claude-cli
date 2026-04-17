@@ -81,14 +81,7 @@ export default function (pi: ExtensionAPI) {
       maxTokens: model.maxTokens,
     }));
 
-    // Ensure all registered tools are active so pi can execute them.
-    // Some tools (find, grep, ls) are registered but not activated by default.
-    pi.on("session_start", async () => {
-      const allTools = pi.getAllTools();
-      if (Array.isArray(allTools)) {
-        pi.setActiveTools(allTools.map((t: any) => t.name));
-      }
-    });
+
 
     pi.registerProvider(PROVIDER_ID, {
       baseUrl: "pi-claude-cli",
@@ -96,6 +89,16 @@ export default function (pi: ExtensionAPI) {
       api: "pi-claude-cli",
       models,
       streamSimple: (model, context, options) => {
+        // Activate grep and find on every call. These are off-by-default in pi
+        // but Claude Code expects them (via Bash fallbacks). Explicitly naming
+        // the tools we need is more future-proof than "all except ls" — if pi
+        // adds more off-by-default tools, they won't be silently activated.
+        const active = new Set(pi.getActiveTools());
+        active.add("grep");
+        active.add("find");
+        active.delete("ls");
+        pi.setActiveTools([...active]);
+
         const configPath = ensureMcpConfig(pi);
         return streamViaCli(model, context, {
           ...options,

@@ -24,7 +24,7 @@ describe("getCustomToolDefs", () => {
     vi.clearAllMocks();
   });
 
-  it("filters out all 6 built-in tools and returns only custom tools", () => {
+  it("filters out built-in tools and inactive tools, returning only active custom tools", () => {
     const mockPi = {
       getAllTools: vi.fn(() => [
         {
@@ -51,6 +51,11 @@ describe("getCustomToolDefs", () => {
         {
           name: "find",
           description: "Find files",
+          parameters: { type: "object" },
+        },
+        {
+          name: "ls",
+          description: "List directory",
           parameters: { type: "object" },
         },
         {
@@ -70,16 +75,22 @@ describe("getCustomToolDefs", () => {
           },
         },
       ]),
+      // ls is registered but not activated — should be excluded
+      getActiveTools: vi.fn(() => [
+        "read", "write", "edit", "bash", "grep", "find", "search", "deploy",
+      ]),
     };
 
     const result = getCustomToolDefs(mockPi);
 
+    // ls is filtered out because it's not active
+    // read/write/edit/bash/grep/find are filtered out because they're built-in
     expect(result).toHaveLength(2);
     expect(result[0].name).toBe("search");
     expect(result[1].name).toBe("deploy");
   });
 
-  it("returns empty array when all tools are built-in", () => {
+  it("returns empty array when all active tools are built-in", () => {
     const mockPi = {
       getAllTools: vi.fn(() => [
         {
@@ -108,11 +119,48 @@ describe("getCustomToolDefs", () => {
           description: "Find files",
           parameters: { type: "object" },
         },
+        {
+          name: "ls",
+          description: "List directory",
+          parameters: { type: "object" },
+        },
+      ]),
+      // Only built-in tools are active; ls is inactive
+      getActiveTools: vi.fn(() => [
+        "read", "write", "edit", "bash", "grep", "find",
       ]),
     };
 
     const result = getCustomToolDefs(mockPi);
     expect(result).toEqual([]);
+  });
+
+  it("exposes ls as a custom MCP tool when another extension activates it", () => {
+    const mockPi = {
+      getAllTools: vi.fn(() => [
+        { name: "read", description: "Read file", parameters: { type: "object" } },
+        { name: "write", description: "Write file", parameters: { type: "object" } },
+        { name: "edit", description: "Edit file", parameters: { type: "object" } },
+        { name: "bash", description: "Run bash", parameters: { type: "object" } },
+        { name: "grep", description: "Search", parameters: { type: "object" } },
+        { name: "find", description: "Find files", parameters: { type: "object" } },
+        { name: "ls", description: "List directory", parameters: { type: "object" } },
+        { name: "deploy", description: "Deploy app", parameters: { type: "object", properties: { target: { type: "string" } } } },
+      ]),
+      // Another extension activated ls, so it's in the active set
+      getActiveTools: vi.fn(() => [
+        "read", "write", "edit", "bash", "grep", "find", "ls", "deploy",
+      ]),
+    };
+
+    const result = getCustomToolDefs(mockPi);
+
+    // ls is not built-in but IS active → exposed as custom MCP tool
+    // deploy is also custom and active
+    // read/write/edit/bash/grep/find are built-in → excluded
+    expect(result).toHaveLength(2);
+    expect(result.map((t: any) => t.name)).toContain("ls");
+    expect(result.map((t: any) => t.name)).toContain("deploy");
   });
 
   it("includes custom tool with correct name, description, inputSchema from parameters", () => {
@@ -133,6 +181,7 @@ describe("getCustomToolDefs", () => {
           parameters: customParams,
         },
       ]),
+      getActiveTools: vi.fn(() => ["custom_search"]),
     };
 
     const result = getCustomToolDefs(mockPi);
