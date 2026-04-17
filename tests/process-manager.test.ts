@@ -91,12 +91,12 @@ describe("spawnClaude", () => {
     expect(options.cwd).toBe("/custom/path");
   });
 
-  it("writes system prompt to temp file and passes path via --append-system-prompt", () => {
+  it("writes system prompt to temp file and passes path via --system-prompt", () => {
     spawnClaude("claude-sonnet-4-5-20250929", "You are a helpful assistant.");
     const args = (spawn as any).mock.calls[0][1] as string[];
 
-    expect(args).toContain("--append-system-prompt");
-    const idx = args.indexOf("--append-system-prompt");
+    expect(args).toContain("--system-prompt");
+    const idx = args.indexOf("--system-prompt");
     expect(args[idx + 1]).toContain("pi-claude-cli-sysprompt-");
   });
 
@@ -110,10 +110,10 @@ describe("spawnClaude", () => {
     expect(readFileSync(tmpFile, "utf-8")).toBe("You are a helpful assistant.");
   });
 
-  it("does not include --append-system-prompt when no system prompt", () => {
+  it("does not include --system-prompt when no system prompt", () => {
     spawnClaude("claude-sonnet-4-5-20250929");
     const args = (spawn as any).mock.calls[0][1] as string[];
-    expect(args).not.toContain("--append-system-prompt");
+    expect(args).not.toContain("--system-prompt");
   });
 
   it("returns the spawned ChildProcess", () => {
@@ -175,7 +175,7 @@ describe("effort flag", () => {
     });
     const args = (spawn as any).mock.calls[0][1] as string[];
 
-    expect(args).toContain("--append-system-prompt");
+    expect(args).toContain("--system-prompt");
     expect(args).not.toContain("--effort");
   });
 });
@@ -419,7 +419,7 @@ describe("mcp-config flag", () => {
     });
     const args = (spawn as any).mock.calls[0][1] as string[];
 
-    expect(args).toContain("--append-system-prompt");
+    expect(args).toContain("--system-prompt");
     expect(args).toContain("--effort");
     expect(args).not.toContain("--mcp-config");
     expect(args).toContain("--permission-prompt-tool");

@@ -1065,3 +1065,259 @@ describe("buildResumePrompt", () => {
     expect((result as any[])[1].type).toBe("image");
   });
 });
+
+describe("replacePiToolSections", () => {
+  // Import the function we need to test. It's not exported, so we test it
+  // indirectly through buildSystemPrompt, but we can also test the logic
+  // by constructing a pi-style system prompt and verifying transformation.
+
+  /**
+   * Build a realistic pi system prompt for testing.
+   * Mirrors the structure from pi-coding-agent's buildSystemPrompt().
+   */
+  function buildPiSystemPrompt(tools: string[] = ["read", "bash", "edit", "write", "grep", "find", "ls"]): string {
+    const toolDescriptions: Record<string, string> = {
+      read: "Read file contents",
+      bash: "Execute bash commands (ls, grep, find, etc.)",
+      edit: "Make surgical edits to files (find exact text and replace)",
+      write: "Create or overwrite files",
+      grep: "Search file contents for patterns (respects .gitignore)",
+      find: "Find files by glob pattern (respects .gitignore)",
+      ls: "List directory contents",
+    };
+    const toolsList = tools.map((t) => `- ${t}: ${toolDescriptions[t]}`).join("\n");
+    const guidelinesList: string[] = [];
+    if (tools.includes("bash") && (tools.includes("grep") || tools.includes("find") || tools.includes("ls"))) {
+      guidelinesList.push("Prefer grep/find/ls tools over bash for file exploration (faster, respects .gitignore)");
+    }
+    if (tools.includes("read") && tools.includes("edit")) {
+      guidelinesList.push("Use read to examine files before editing. You must use this tool instead of cat or sed.");
+    }
+    if (tools.includes("edit")) {
+      guidelinesList.push("Use edit for precise changes (old text must match exactly)");
+    }
+    if (tools.includes("write")) {
+      guidelinesList.push("Use write only for new files or complete rewrites");
+    }
+    guidelinesList.push("Be concise in your responses");
+    guidelinesList.push("Show file paths clearly when working with files");
+    const guidelines = guidelinesList.map((g) => `- ${g}`).join("\n");
+
+    return `You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.
+
+Available tools:
+${toolsList}
+
+In addition to the tools above, you may have access to other custom tools depending on the project.
+
+Guidelines:
+${guidelines}
+
+Pi documentation (read only when the user asks about pi itself, its SDK, extensions, themes, skills, or TUI):
+- Main documentation: /path/to/readme
+- Additional docs: /path/to/docs
+- When working on pi topics, read the docs and examples
+
+Current date and time: Friday, April 17, 2026 at 12:00:00 PM EDT
+Current working directory: /some/project`;
+  }
+
+  it("replaces Available tools through Guidelines sections with Claude Code equivalents", async () => {
+    vi.doMock("node:fs", () => ({
+      existsSync: () => false,
+      readFileSync: () => "",
+    }));
+
+    const { buildSystemPrompt: bsp } = await import("../src/prompt-builder");
+    const context = {
+      systemPrompt: buildPiSystemPrompt(),
+      messages: [],
+    } as unknown as any;
+    const result = bsp(context, "/some/project");
+
+    // Should contain Claude Code tool names
+    expect(result).toContain("Read");
+    expect(result).toContain("Write");
+    expect(result).toContain("Edit");
+    expect(result).toContain("Bash");
+    expect(result).toContain("Grep");
+    expect(result).toContain("Glob");
+
+    // Should contain Claude Code parameter names
+    expect(result).toContain("file_path");
+    expect(result).toContain("old_string");
+    expect(result).toContain("new_string");
+
+    // Should NOT contain pi's tool names in tool-reference context
+    // (they may still appear in other contexts like "writing files")
+    expect(result).not.toMatch(/Available tools:\n- read:/);
+    expect(result).not.toMatch(/Available tools:\n- grep:/);
+    expect(result).not.toMatch(/Available tools:\n- find:/);
+
+    // Should NOT contain pi-specific guidelines
+    expect(result).not.toContain("Use read to examine files");
+    expect(result).not.toContain("Use edit for precise changes (old text must match exactly)");
+    expect(result).not.toContain("Use write only for new files or complete rewrites");
+    expect(result).not.toContain("Prefer grep/find/ls tools over bash");
+
+    // Should contain Claude Code-appropriate guidelines
+    expect(result).toContain("Use Read to examine files before editing");
+    expect(result).toContain("Use Edit for precise changes (old_string must match exactly)");
+    expect(result).toContain("Use Write only for new files or complete rewrites");
+    expect(result).toContain("Prefer Grep and Glob over Bash for file exploration");
+
+    // Should NOT contain "In addition to the tools above" (references removed section)
+    expect(result).not.toContain("In addition to the tools above");
+  });
+
+  it("preserves sections before Available tools and after Guidelines", async () => {
+    vi.doMock("node:fs", () => ({
+      existsSync: () => false,
+      readFileSync: () => "",
+    }));
+
+    const { buildSystemPrompt: bsp } = await import("../src/prompt-builder");
+    const context = {
+      systemPrompt: buildPiSystemPrompt(),
+      messages: [],
+    } as unknown as any;
+    const result = bsp(context, "/some/project");
+
+    // Intro paragraph should be preserved
+    expect(result).toContain("You are an expert coding assistant operating inside pi");
+
+    // Pi documentation section should be preserved
+    expect(result).toContain("Pi documentation");
+    expect(result).toContain("Main documentation");
+
+    // Date/time and working directory should be preserved
+    expect(result).toContain("Current date and time:");
+    expect(result).toContain("Current working directory:");
+  });
+
+  it("passes through system prompt unchanged when Available tools section is missing", async () => {
+    vi.doMock("node:fs", () => ({
+      existsSync: () => false,
+      readFileSync: () => "",
+    }));
+
+    const { buildSystemPrompt: bsp } = await import("../src/prompt-builder");
+    const context = {
+      systemPrompt: "You are a helpful assistant.\n\nGuidelines:\n- Be concise",
+      messages: [],
+    } as unknown as any;
+    const result = bsp(context, "/some/project");
+
+    // Should be unchanged (no "Available tools:" section found)
+    expect(result).toBe("You are a helpful assistant.\n\nGuidelines:\n- Be concise");
+  });
+
+  it("passes through system prompt unchanged when Guidelines section is missing", async () => {
+    vi.doMock("node:fs", () => () => ({
+      existsSync: () => false,
+      readFileSync: () => "",
+    }));
+
+    const { buildSystemPrompt: bsp } = await import("../src/prompt-builder");
+    const context = {
+      systemPrompt: "You are a helpful assistant.\n\nAvailable tools:\n- read: Read files",
+      messages: [],
+    } as unknown as any;
+    const result = bsp(context, "/some/project");
+
+    // Should be unchanged (no "Guidelines:" section found)
+    expect(result).toBe("You are a helpful assistant.\n\nAvailable tools:\n- read: Read files");
+  });
+
+  it("handles minimal system prompt with just intro and tools", async () => {
+    vi.doMock("node:fs", () => ({
+      existsSync: () => false,
+      readFileSync: () => "",
+    }));
+
+    const { buildSystemPrompt: bsp } = await import("../src/prompt-builder");
+    const context = {
+      systemPrompt: "Intro text\n\nAvailable tools:\n- read: Read\n- write: Write\n\nGuidelines:\n- Be good\n- Be fast",
+      messages: [],
+    } as unknown as any;
+    const result = bsp(context, "/some/project");
+
+    expect(result).toContain("Intro text");
+    expect(result).toContain("Read");
+    expect(result).toContain("Glob");
+    expect(result).not.toContain("- read: Read");
+    expect(result).not.toContain("- Be good"); // Old guidelines removed
+  });
+
+  it("works with custom system prompt (no tool sections at all)", async () => {
+    vi.doMock("node:fs", () => ({
+      existsSync: () => false,
+      readFileSync: () => "",
+    }));
+
+    const { buildSystemPrompt: bsp } = await import("../src/prompt-builder");
+    const context = {
+      systemPrompt: "You are a specialized assistant for React development.",
+      messages: [],
+    } as unknown as any;
+    const result = bsp(context, "/some/project");
+
+    // Custom prompt without tool sections should pass through unchanged
+    expect(result).toBe("You are a specialized assistant for React development.");
+  });
+
+  it("places Claude Code tools section between intro and remaining sections", async () => {
+    vi.doMock("node:fs", () => ({
+      existsSync: () => false,
+      readFileSync: () => "",
+    }));
+
+    const { buildSystemPrompt: bsp } = await import("../src/prompt-builder");
+    const context = {
+      systemPrompt: buildPiSystemPrompt(),
+      messages: [],
+    } as unknown as any;
+    const result = bsp(context, "/some/project");
+
+    // The Claude Code tools section should come after the intro
+    const introIdx = result.indexOf("You are an expert coding assistant");
+    const toolsIdx = result.indexOf("Available tools:");
+    const piDocsIdx = result.indexOf("Pi documentation");
+
+    expect(introIdx).toBeLessThan(toolsIdx);
+    expect(toolsIdx).toBeLessThan(piDocsIdx);
+  });
+
+  it("removes the 'In addition to the tools above' line", async () => {
+    vi.doMock("node:fs", () => ({
+      existsSync: () => false,
+      readFileSync: () => "",
+    }));
+
+    const { buildSystemPrompt: bsp } = await import("../src/prompt-builder");
+    const prompt = buildPiSystemPrompt();
+    expect(prompt).toContain("In addition to the tools above"); // Verify it's there initially
+
+    const context = {
+      systemPrompt: prompt,
+      messages: [],
+    } as unknown as any;
+    const result = bsp(context, "/some/project");
+    expect(result).not.toContain("In addition to the tools above");
+  });
+
+  it("handles empty system prompt", async () => {
+    vi.doMock("node:fs", () => ({
+      existsSync: () => false,
+      readFileSync: () => "",
+    }));
+
+    const { buildSystemPrompt: bsp } = await import("../src/prompt-builder");
+    const context = {
+      systemPrompt: "",
+      messages: [],
+    } as unknown as any;
+    const result = bsp(context, "/some/project");
+    expect(result).toBe("");
+  });
+});

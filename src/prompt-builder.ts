@@ -349,8 +349,89 @@ function findFinalUserMessageIndex(messages: any[]): number {
 }
 
 /**
+ * Claude Code tool names and key parameters, replacing pi's tool-specific sections.
+ *
+ * When using --system-prompt to replace Claude Code's default prompt, the LLM
+ * sees tool definitions from the API (Read, Write, Edit, Bash, Grep, Glob)
+ * but NOT behavioral guidance about when/how to use them. This replacement
+ * section provides that guidance using correct Claude Code tool names and
+ * parameter names, so the LLM gets proper usage instructions that match
+ * the actual tool schemas.
+ */
+const CLAUDE_CODE_TOOLS_SECTION = `
+Available tools:
+- Read: Read file contents (key param: file_path)
+- Write: Create or overwrite files (key params: file_path, content)
+- Edit: Make precise edits with exact text replacement (key params: file_path, old_string, new_string)
+- Bash: Execute bash commands (key param: command)
+- Grep: Search file contents for patterns (key params: pattern, path)
+- Glob: Find files by glob pattern (key params: pattern, path)
+
+You also have access to custom project tools registered via MCP.
+
+Guidelines:
+- Prefer Grep and Glob over Bash for file exploration (faster, respects .gitignore)
+- Use Read to examine files before editing
+- Use Edit for precise changes (old_string must match exactly)
+- Use Write only for new files or complete rewrites
+- When summarizing your actions, output plain text directly - do NOT use Bash to display what you did
+- Be concise in your responses
+- Show file paths clearly when working with files`.trim();
+
+/**
+ * Replace pi's tool-specific sections ("Available tools:" through "Guidelines:")
+ * in the system prompt with Claude Code–correct equivalents.
+ *
+ * Pi's system prompt includes tool descriptions and guidelines that use pi's
+ * lowercase tool names (read, edit, grep, find, ls) and parameter names
+ * (path, oldText, newText). When routed through Claude Code, the LLM sees
+ * different tool schemas: PascalCase names (Read, Edit, Grep, Glob) and
+ * different parameter names (file_path, old_string, new_string). The pi
+ * sections are actively misleading in that context. This function strips them
+ * and replaces them with a section that matches Claude Code's actual tools.
+ *
+ * If the expected sections are not found (e.g., pi changes its format),
+ * the original prompt is returned unchanged — worst case is a slightly
+ * misleading prompt, not a crash.
+ */
+function replacePiToolSections(systemPrompt: string): string {
+  // Split into double-newline-separated blocks
+  const blocks = systemPrompt.split("\n\n");
+
+  // Find the indices of the tool-specific sections
+  const availableToolsIdx = blocks.findIndex((block) =>
+    block.startsWith("Available tools:\n"),
+  );
+  const guidelinesIdx = blocks.findIndex((block) =>
+    block.startsWith("Guidelines:\n"),
+  );
+
+  // If we can't find both sections, return the prompt unchanged
+  if (availableToolsIdx === -1 || guidelinesIdx === -1) {
+    return systemPrompt;
+  }
+
+  // Remove blocks from "Available tools:" through "Guidelines:" (inclusive)
+  // This also removes the "In addition to the tools above" line between them
+  const filtered = blocks.filter(
+    (_, idx) => idx < availableToolsIdx || idx > guidelinesIdx,
+  );
+
+  // Insert the Claude Code replacement after the intro paragraph
+  // (which is the first block)
+  if (filtered.length > 0) {
+    filtered.splice(1, 0, CLAUDE_CODE_TOOLS_SECTION);
+  } else {
+    filtered.push(CLAUDE_CODE_TOOLS_SECTION);
+  }
+
+  return filtered.join("\n\n");
+}
+
+/**
  * Builds the system prompt from the context's systemPrompt field,
- * appending AGENTS.md content if found (walking up from cwd, then global fallback).
+ * replacing pi's tool sections with Claude Code equivalents,
+ * then appending AGENTS.md content if found.
  * Sanitizes .pi references to .claude for Claude Code compatibility.
  */
 export function buildSystemPrompt(
@@ -360,7 +441,12 @@ export function buildSystemPrompt(
   const parts: string[] = [];
 
   if (context.systemPrompt) {
-    parts.push(context.systemPrompt);
+    // Replace pi's tool-specific sections with Claude Code equivalents
+    // before passing the system prompt through to the subprocess.
+    // Pi uses lowercase names (read, grep, find, ls) and different parameter
+    // names (path, oldText, newText) that don't match Claude Code's tools
+    // (Read, Edit, Grep, Glob with file_path, old_string, new_string).
+    parts.push(replacePiToolSections(context.systemPrompt));
   }
 
   // Look for AGENTS.md
