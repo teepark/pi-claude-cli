@@ -15,6 +15,7 @@
  */
 
 import { createInterface } from "node:readline";
+import { appendFileSync } from "node:fs";
 import {
   AssistantMessageEventStream,
   type Model,
@@ -41,6 +42,14 @@ import { mapThinkingEffort } from "./thinking-config.js";
 import { isPiKnownClaudeTool } from "./tool-mapping.js";
 /** Inactivity timeout: kill subprocess if no stdout for 180 seconds (3 minutes). */
 const INACTIVITY_TIMEOUT_MS = 180_000;
+const DEBUG_LOG = "/tmp/pi-claude-cli-debug.log";
+
+function debugLog(label: string, data?: any) {
+  try {
+    const line = `[${new Date().toISOString()}] ${label}${data === undefined ? "" : ` ${JSON.stringify(data)}`}\n`;
+    appendFileSync(DEBUG_LOG, line);
+  } catch {}
+}
 
 /** Extended stream options: pi's SimpleStreamOptions plus optional cwd and mcpConfigPath */
 type StreamViaCLiOptions = SimpleStreamOptions & {
@@ -81,19 +90,37 @@ export function streamViaCli(
     try {
       const cwd = options?.cwd ?? process.cwd();
 
-      // Resume if pi provides a session ID AND this isn't the first turn.
-      // Pi passes sessionId on every call (including first), but we can only
-      // --resume a CLI session that already exists on disk from a prior turn.
+      const hasToolResults = context.messages.some(
+        (m: any) => m.role === "toolResult",
+      );
+
+      // IMPORTANT: a tool_use turn is interrupted early via SIGKILL so Claude
+      // often hasn't persisted a resumable session yet. Resuming such a turn
+      // fails with "No conversation found with session ID". For any context
+      // involving tool results, fall back to full-history replay instead of
+      // --resume/--session-id.
       const resumeSessionId =
-        options?.sessionId && context.messages.length > 1
+        options?.sessionId && context.messages.length > 1 && !hasToolResults
+          ? options.sessionId
+          : undefined;
+      const newSessionId =
+        options?.sessionId && context.messages.length === 1 && !hasToolResults
           ? options.sessionId
           : undefined;
 
       // Build prompt: if resuming, only send the latest user turn;
-      // otherwise build the full flattened conversation history
+      // otherwise build the full flattened conversation history.
       const prompt = resumeSessionId
         ? buildResumePrompt(context)
         : buildPrompt(context);
+      debugLog("start", {
+        sessionId: (options as any)?.sessionId,
+        resumeSessionId,
+        newSessionId,
+        hasToolResults,
+        messageCount: context.messages.length,
+        promptKind: Array.isArray(prompt) ? "array" : typeof prompt,
+      });
       const systemPrompt = resumeSessionId
         ? undefined
         : buildSystemPrompt(context, cwd);
@@ -112,9 +139,10 @@ export function streamViaCli(
         effort,
         mcpConfigPath: options?.mcpConfigPath,
         resumeSessionId,
-        newSessionId: !resumeSessionId ? options?.sessionId : undefined,
+        newSessionId,
       });
       const getStderr = captureStderr(proc);
+      debugLog("spawned", { pid: proc.pid, resumeSessionId, newSessionId });
 
       // Register in global process registry for teardown cleanup
       registerProcess(proc);
@@ -128,6 +156,9 @@ export function streamViaCli(
       // Guard against double stream.end() and double error events.
       // First error path wins; subsequent ones are no-ops.
       let streamEnded = false;
+      // Claude CLI sometimes emits only a final {type:"result", result:"..."}
+      // without streaming text blocks first. Preserve that text as a fallback.
+      let resultTextFallback: string | undefined;
 
       /**
        * End the stream with an error, using a "done" event instead of "error".
@@ -231,6 +262,7 @@ export function streamViaCli(
 
         const msg = parseLine(line);
         if (!msg) return;
+        debugLog("msg", { type: (msg as any).type, subtype: (msg as any).subtype, eventType: (msg as any).event?.type });
 
         if (msg.type === "stream_event") {
           // Only forward top-level events to pi's event bridge.
@@ -264,6 +296,7 @@ export function streamViaCli(
             broken = true; // Set guard BEFORE rl.close() to prevent buffered lines
             clearTimeout(inactivityTimer);
             // Pi will execute these tools. Kill subprocess to prevent CLI from executing them.
+            debugLog("break-early", { pid: proc?.pid });
             forceKillProcess(proc!);
             rl.close();
             return; // Don't process further -- done event already pushed by event bridge
@@ -272,7 +305,11 @@ export function streamViaCli(
           handleControlRequest(msg, proc!.stdin!);
         } else if (msg.type === "result") {
           if (msg.subtype === "error") {
+            debugLog("result-error", msg);
             endStreamWithError(msg.error ?? "Unknown error from Claude CLI");
+          } else if (msg.subtype === "success" && msg.result) {
+            debugLog("result-success", { result: msg.result, session_id: (msg as any).session_id });
+            resultTextFallback = msg.result;
           }
           // For both success and error: clean up the subprocess
           clearTimeout(inactivityTimer);
@@ -292,6 +329,13 @@ export function streamViaCli(
       if (!streamEnded) {
         const output = bridge.getOutput();
 
+        if (
+          resultTextFallback &&
+          (!output.content || output.content.length === 0)
+        ) {
+          output.content = [{ type: "text", text: resultTextFallback }] as any;
+        }
+
         // If stopReason is toolUse but there are no pi-known tool calls in content,
         // it means only user MCP tools were called (filtered by event bridge).
         // Override to "stop" so pi doesn't try to execute non-existent tools.
@@ -304,6 +348,7 @@ export function streamViaCli(
             : output.stopReason;
 
         streamEnded = true;
+        debugLog("done", { effectiveReason, contentTypes: (output.content || []).map((c: any) => c.type) });
         stream.push({
           type: "done",
           reason:

@@ -259,6 +259,40 @@ describe("streamViaCli", () => {
     expect(eventTypes).toContain("done");
   });
 
+  it("uses result.text as fallback when Claude emits no streamed content blocks", async () => {
+    const model = mockModels[0] as any;
+    const context = {
+      messages: [{ role: "user", content: "Hello" }],
+    };
+
+    streamViaCli(model, context);
+    await vi.advanceTimersByTimeAsync(0);
+
+    const proc = (spawn as any).mock.results[0].value;
+
+    const lines = [
+      JSON.stringify({ type: "system", subtype: "init", session_id: "test" }),
+      JSON.stringify({
+        type: "result",
+        subtype: "success",
+        result: "Hello from result fallback",
+      }),
+    ];
+
+    for (const line of lines) {
+      proc.stdout.write(line + "\n");
+    }
+    proc.stdout.end();
+    await vi.advanceTimersByTimeAsync(100);
+
+    const mockStream = MockAssistantMessageEventStream.mock.instances[0];
+    const doneEvent = mockStream._events.find((e: any) => e.type === "done");
+    expect(doneEvent).toBeDefined();
+    expect(doneEvent.message.content).toEqual([
+      { type: "text", text: "Hello from result fallback" },
+    ]);
+  });
+
   it("handles result error by pushing error event", async () => {
     const model = mockModels[0] as any;
     const context = {
@@ -1832,6 +1866,48 @@ describe("streamViaCli", () => {
       await vi.advanceTimersByTimeAsync(100);
     });
 
+    it("does not pass --resume when context includes tool results", async () => {
+      const model = mockModels[0] as any;
+      const context = {
+        messages: [
+          { role: "user", content: "Hello" },
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "toolCall",
+                id: "tool_1",
+                name: "bash",
+                arguments: { command: "pwd" },
+              },
+            ],
+          },
+          {
+            role: "toolResult",
+            toolCallId: "tool_1",
+            toolName: "bash",
+            content: "ok",
+          },
+        ],
+      };
+
+      streamViaCli(model, context, { sessionId: "sess-abc-123" } as any);
+      await vi.advanceTimersByTimeAsync(0);
+
+      const args = (spawn as any).mock.calls[0][1] as string[];
+      expect(args).not.toContain("--resume");
+      expect(args).not.toContain("--session-id");
+
+      const proc = (spawn as any).mock.results[0].value;
+      const written = proc.stdin.write.mock.calls[0][0] as string;
+      const parsed = JSON.parse(written.trim());
+      expect(typeof parsed.message.content).toBe("string");
+      expect(parsed.message.content).toContain("TOOL RESULT (historical Bash):");
+
+      proc.stdout.end();
+      await vi.advanceTimersByTimeAsync(100);
+    });
+
     it("does not pass --resume or --session-id when no sessionId option", async () => {
       const model = mockModels[0] as any;
       const context = {
@@ -1868,7 +1944,9 @@ describe("streamViaCli", () => {
       const written = proc.stdin.write.mock.calls[0][0] as string;
       const parsed = JSON.parse(written.trim());
       // Should only contain the latest user message, not full history
-      expect(parsed.message.content).toBe("follow-up");
+      expect(parsed.message.content).toEqual([
+        { type: "text", text: "follow-up" },
+      ]);
 
       // Clean up
       proc.stdout.end();

@@ -921,7 +921,9 @@ describe("buildResumePrompt", () => {
     const context = {
       messages: [{ role: "user", content: "Hello world" }],
     };
-    expect(buildResumePrompt(context)).toBe("Hello world");
+    expect(buildResumePrompt(context)).toEqual([
+      { type: "text", text: "Hello world" },
+    ]);
   });
 
   it("extracts only the last user message from a multi-turn conversation", () => {
@@ -932,7 +934,9 @@ describe("buildResumePrompt", () => {
         { role: "user", content: "Follow-up question" },
       ],
     };
-    expect(buildResumePrompt(context)).toBe("Follow-up question");
+    expect(buildResumePrompt(context)).toEqual([
+      { type: "text", text: "Follow-up question" },
+    ]);
   });
 
   it("includes tool results preceding the final user message", () => {
@@ -957,10 +961,16 @@ describe("buildResumePrompt", () => {
         { role: "user", content: "Now explain it" },
       ],
     };
-    const result = buildResumePrompt(context) as string;
-    expect(result).toContain("TOOL RESULT (historical Read):");
-    expect(result).toContain("file contents here");
-    expect(result).toContain("Now explain it");
+    const result = buildResumePrompt(context) as any[];
+    expect(result).toEqual([
+      {
+        type: "tool_result",
+        tool_use_id: undefined,
+        content: "file contents here",
+        is_error: undefined,
+      },
+      { type: "text", text: "Now explain it" },
+    ]);
   });
 
   it("includes multiple tool results preceding the final user message", () => {
@@ -995,10 +1005,22 @@ describe("buildResumePrompt", () => {
         { role: "user", content: "Compare them" },
       ],
     };
-    const result = buildResumePrompt(context) as string;
-    expect(result).toContain("contents of a");
-    expect(result).toContain("contents of b");
-    expect(result).toContain("Compare them");
+    const result = buildResumePrompt(context) as any[];
+    expect(result).toEqual([
+      {
+        type: "tool_result",
+        tool_use_id: undefined,
+        content: "contents of a",
+        is_error: undefined,
+      },
+      {
+        type: "tool_result",
+        tool_use_id: undefined,
+        content: "contents of b",
+        is_error: undefined,
+      },
+      { type: "text", text: "Compare them" },
+    ]);
   });
 
   it("handles custom tool results with plain name format", () => {
@@ -1017,13 +1039,141 @@ describe("buildResumePrompt", () => {
         { role: "user", content: "Check status" },
       ],
     };
-    const result = buildResumePrompt(context) as string;
-    expect(result).toContain("TOOL RESULT (deploy):");
-    expect(result).toContain("Deployed successfully");
-    expect(result).toContain("Check status");
+    const result = buildResumePrompt(context) as any[];
+    expect(result).toEqual([
+      {
+        type: "tool_result",
+        tool_use_id: undefined,
+        content: "Deployed successfully",
+        is_error: undefined,
+      },
+      { type: "text", text: "Check status" },
+    ]);
   });
 
-  it("returns empty string when no user message found", () => {
+  it("resumes from trailing tool results with no final user message", () => {
+    const context = {
+      messages: [
+        { role: "user", content: "Read a file" },
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: "tool_1",
+              name: "read",
+              arguments: { path: "/foo.ts" },
+            },
+          ],
+        },
+        {
+          role: "toolResult",
+          toolCallId: "tool_1",
+          toolName: "read",
+          content: "file contents here",
+        },
+      ],
+    };
+
+    expect(buildResumePrompt(context)).toEqual([
+      {
+        type: "tool_result",
+        tool_use_id: "tool_1",
+        content: "file contents here",
+        is_error: undefined,
+      },
+    ]);
+  });
+
+  it("resumes from complete parallel tool results before final user message", () => {
+    const context = {
+      messages: [
+        { role: "user", content: "Read two files" },
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: "tool_a",
+              name: "read",
+              arguments: { path: "/a.ts" },
+            },
+            {
+              type: "toolCall",
+              id: "tool_b",
+              name: "read",
+              arguments: { path: "/b.ts" },
+            },
+          ],
+        },
+        {
+          role: "toolResult",
+          toolCallId: "tool_a",
+          toolName: "read",
+          content: "contents of a",
+        },
+        {
+          role: "toolResult",
+          toolCallId: "tool_b",
+          toolName: "read",
+          content: "contents of b",
+        },
+        { role: "user", content: "Compare them" },
+      ],
+    };
+
+    const result = buildResumePrompt(context) as any[];
+    expect(result).toEqual([
+      {
+        type: "tool_result",
+        tool_use_id: "tool_a",
+        content: "contents of a",
+        is_error: undefined,
+      },
+      {
+        type: "tool_result",
+        tool_use_id: "tool_b",
+        content: "contents of b",
+        is_error: undefined,
+      },
+      { type: "text", text: "Compare them" },
+    ]);
+  });
+
+  it("returns empty string for incomplete parallel tool-result batch", () => {
+    const context = {
+      messages: [
+        { role: "user", content: "Read two files" },
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: "tool_a",
+              name: "read",
+              arguments: { path: "/a.ts" },
+            },
+            {
+              type: "toolCall",
+              id: "tool_b",
+              name: "read",
+              arguments: { path: "/b.ts" },
+            },
+          ],
+        },
+        {
+          role: "toolResult",
+          toolCallId: "tool_a",
+          toolName: "read",
+          content: "contents of a",
+        },
+      ],
+    };
+
+    expect(buildResumePrompt(context)).toBe("");
+  });
+
+  it("returns empty string when no resumable user or tool-result input found", () => {
     const context = {
       messages: [{ role: "assistant", content: "Hello" }],
     };
@@ -1039,7 +1189,9 @@ describe("buildResumePrompt", () => {
         },
       ],
     };
-    expect(buildResumePrompt(context)).toBe("Hello from blocks");
+    expect(buildResumePrompt(context)).toEqual([
+      { type: "text", text: "Hello from blocks" },
+    ]);
   });
 
   it("handles images in the final user message by returning ContentBlock[]", () => {

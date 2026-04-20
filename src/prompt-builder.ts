@@ -29,6 +29,15 @@ type AnthropicContentBlock =
       source: { type: "base64"; media_type: string; data: string };
     };
 
+type ClaudeToolResultBlock = {
+  type: "tool_result";
+  tool_use_id?: string;
+  content: string | AnthropicContentBlock[];
+  is_error?: boolean;
+};
+
+type ClaudeResumeBlock = AnthropicContentBlock | ClaudeToolResultBlock;
+
 // We use `any` for Context to avoid requiring @mariozechner/pi-ai at dev time.
 // At runtime, pi provides the real Context type.
 
@@ -138,77 +147,175 @@ function buildCustomToolResultPrompt(messages: any[]): string | null {
 }
 
 /**
- * Build a prompt for a resumed session.
- *
- * When resuming via --resume, the CLI already has the full conversation history.
- * We only need to send the new content since the last turn: the last assistant
- * response's tool results (if any) followed by the latest user message.
- *
- * For tool_use flows: pi sends [user, assistant(toolCall), toolResult, ...]
- * We need to include tool results so the resumed session sees them, plus the
- * final user message.
- *
- * Falls back to full prompt if the message structure is unexpected.
+ * Find the contiguous trailing toolResult block that ends at endExclusive.
  */
-export function buildResumePrompt(context: {
-  messages: any[];
-}): string | AnthropicContentBlock[] {
-  const messages = context.messages;
-  if (messages.length === 0) return "";
-
-  // Find the last user message
-  const finalUserIndex = findFinalUserMessageIndex(messages);
-  if (finalUserIndex < 0) return "";
-
-  // Collect new messages: everything from the last assistant turn onwards
-  // (tool results from the last assistant + the new user message)
-  const newMessages: any[] = [];
-
-  // Walk backwards from finalUserIndex to find where new content starts.
-  // Include trailing toolResult messages that follow the last assistant turn.
-  let startIdx = finalUserIndex;
-  for (let i = finalUserIndex - 1; i >= 0; i--) {
+function findTrailingToolResults(
+  messages: any[],
+  endExclusive: number,
+): { start: number; results: any[] } | null {
+  let start = endExclusive;
+  for (let i = endExclusive - 1; i >= 0; i--) {
     if (messages[i].role === "toolResult") {
-      startIdx = i;
+      start = i;
     } else {
       break;
     }
   }
 
-  for (let i = startIdx; i < messages.length; i++) {
-    newMessages.push(messages[i]);
+  if (start === endExclusive) return null;
+  return {
+    start,
+    results: messages.slice(start, endExclusive),
+  };
+}
+
+/**
+ * Extract toolCall blocks from an assistant message.
+ */
+function getAssistantToolCalls(message: any): any[] {
+  if (message?.role !== "assistant" || !Array.isArray(message.content)) {
+    return [];
+  }
+  return message.content.filter((block: any) => block.type === "toolCall");
+}
+
+/**
+ * Check whether a contiguous trailing toolResult block fully satisfies the
+ * immediately preceding assistant tool-call batch.
+ *
+ * Uses toolCallId matching when available; otherwise falls back to count.
+ */
+function hasCompleteToolResultBatch(
+  messages: any[],
+  toolResultStart: number,
+  toolResultEndExclusive: number,
+): boolean {
+  if (toolResultStart <= 0) return false;
+
+  const toolCalls = getAssistantToolCalls(messages[toolResultStart - 1]);
+  const toolResults = messages.slice(toolResultStart, toolResultEndExclusive);
+
+  if (toolCalls.length === 0) return false;
+  if (toolResults.length !== toolCalls.length) return false;
+
+  const expectedIds = toolCalls
+    .map((toolCall: any) => toolCall.id)
+    .filter((id: any) => typeof id === "string");
+  const resultIds = toolResults
+    .map((toolResult: any) => toolResult.toolCallId)
+    .filter((id: any) => typeof id === "string");
+
+  if (expectedIds.length === toolCalls.length && resultIds.length === toolResults.length) {
+    const resultIdSet = new Set(resultIds);
+    return (
+      resultIdSet.size === expectedIds.length &&
+      expectedIds.every((id: string) => resultIdSet.has(id))
+    );
   }
 
-  // If there are only tool results + one user message, build a combined prompt
-  const parts: string[] = [];
-  for (const msg of newMessages) {
-    if (msg.role === "toolResult") {
-      if (msg.toolName && isCustomToolName(msg.toolName)) {
-        parts.push(`TOOL RESULT (${msg.toolName}):`);
+  return true;
+}
+
+/**
+ * Append a tool result message to resume prompt text parts.
+ */
+function buildToolResultContent(
+  content: string | any[],
+): string | AnthropicContentBlock[] {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+
+  const hasImages = content.some((block) => block.type === "image");
+  if (!hasImages) {
+    return toolResultContentToText(content);
+  }
+
+  const blocks: AnthropicContentBlock[] = [];
+  for (const block of content) {
+    if (block.type === "text") {
+      blocks.push({ type: "text", text: block.text ?? "" });
+    } else if (block.type === "image") {
+      const translated = translateImageBlock(block);
+      if (translated) {
+        blocks.push(translated);
       } else {
-        const claudeToolName = msg.toolName
-          ? mapPiToolNameToClaude(msg.toolName)
-          : "unknown";
-        parts.push(`TOOL RESULT (historical ${claudeToolName}):`);
+        blocks.push({
+          type: "text",
+          text: "[An image was shared here but could not be included]",
+        });
+        placeholderImageCount++;
       }
-      parts.push(toolResultContentToText(msg.content));
-    } else if (msg.role === "user") {
-      // Check for images in the final user message
-      if (contentHasImages(msg.content)) {
-        const textSoFar = parts.join("\n");
-        const userContent = buildFinalUserContent(msg.content);
-        const result: AnthropicContentBlock[] = [];
-        if (textSoFar) {
-          result.push({ type: "text", text: textSoFar });
-        }
-        result.push(...userContent);
-        return result;
-      }
-      parts.push(userContentToText(msg.content));
     }
   }
 
-  return parts.join("\n") || "";
+  if (!blocks.some((block) => block.type === "text")) {
+    blocks.unshift({ type: "text", text: "(see attached image)" });
+  }
+
+  return blocks;
+}
+
+function buildToolResultBlock(msg: any): ClaudeToolResultBlock {
+  return {
+    type: "tool_result",
+    tool_use_id: msg.toolCallId,
+    content: buildToolResultContent(msg.content),
+    is_error: msg.isError,
+  };
+}
+
+/**
+ * Build a prompt for a resumed session.
+ *
+ * When resuming via --resume, the CLI already has the full conversation history.
+ * We only send new input since the last assistant turn:
+ * - trailing tool results alone, or
+ * - trailing tool results followed by the latest user message, or
+ * - just the latest user message.
+ *
+ * If the conversation ends with an incomplete parallel tool-result batch,
+ * returns an empty string so the caller can avoid resuming prematurely.
+ */
+export function buildResumePrompt(context: {
+  messages: any[];
+}): string | ClaudeResumeBlock[] {
+  const messages = context.messages;
+  if (messages.length === 0) return "";
+
+  const last = messages[messages.length - 1];
+  const finalUser = last?.role === "user" ? last : null;
+  const toolResultsEndExclusive = finalUser ? messages.length - 1 : messages.length;
+  const trailingToolResults = findTrailingToolResults(messages, toolResultsEndExclusive);
+
+  const blocks: ClaudeResumeBlock[] = [];
+
+  if (trailingToolResults) {
+    if (
+      !hasCompleteToolResultBatch(
+        messages,
+        trailingToolResults.start,
+        toolResultsEndExclusive,
+      )
+    ) {
+      return "";
+    }
+
+    for (const msg of trailingToolResults.results) {
+      blocks.push(buildToolResultBlock(msg));
+    }
+  }
+
+  if (!finalUser) {
+    return blocks.length > 0 ? blocks : "";
+  }
+
+  if (contentHasImages(finalUser.content)) {
+    blocks.push(...buildFinalUserContent(finalUser.content));
+    return blocks;
+  }
+
+  blocks.push({ type: "text", text: userContentToText(finalUser.content) });
+  return blocks;
 }
 
 export function buildPrompt(context: {
